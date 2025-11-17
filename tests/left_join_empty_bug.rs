@@ -2,17 +2,37 @@
 mod tests {
     use datafusion::arrow::util::pretty::pretty_format_batches;
     use datafusion::physical_plan::{displayable, execute_stream};
+    use datafusion::prelude::SessionConfig;
+    use datafusion::execution::SessionStateBuilder;
     use datafusion_distributed::test_utils::localhost::start_localhost_context;
     use datafusion_distributed::{
-        DefaultSessionBuilder, DistributedConfig, apply_network_boundaries, assert_snapshot,
-        distribute_plan,
+        DistributedPhysicalOptimizerRule, DistributedExt, assert_snapshot,
     };
+    use datafusion_distributed::test_utils::in_memory_channel_resolver::InMemoryChannelResolver;
     use futures::TryStreamExt;
     use std::error::Error;
+    use std::sync::Arc;
+
+    async fn build_distributed_state(
+        ctx: datafusion_distributed::DistributedSessionBuilderContext,
+    ) -> Result<datafusion::execution::SessionState, datafusion::error::DataFusionError> {
+        let config = SessionConfig::new()
+            .with_target_partitions(4);
+
+        let state = SessionStateBuilder::new()
+            .with_runtime_env(ctx.runtime_env)
+            .with_default_features()
+            .with_distributed_channel_resolver(InMemoryChannelResolver::new(4))
+            .with_physical_optimizer_rule(Arc::new(DistributedPhysicalOptimizerRule))
+            .with_config(config)
+            .build();
+
+        Ok(state)
+    }
 
     #[tokio::test]
     async fn test_left_join_empty_right_side_bug() -> Result<(), Box<dyn Error>> {
-        let (ctx, _guard) = start_localhost_context(4, DefaultSessionBuilder).await;
+        let (ctx, _guard) = start_localhost_context(4, build_distributed_state).await;
 
         // Query that does a left join, should return exactly one row.
         let df = ctx
@@ -28,11 +48,7 @@ mod tests {
         let physical = df.create_physical_plan().await?;
         let physical_str = displayable(physical.as_ref()).indent(true).to_string();
 
-        let cfg = DistributedConfig::default().with_network_shuffle_tasks(4);
-        let physical_distributed = apply_network_boundaries(physical.clone(), &cfg)?;
-        let physical_distributed = distribute_plan(physical_distributed)?;
-
-        let mut stream = execute_stream(physical_distributed, ctx.task_ctx())?;
+        let mut stream = execute_stream(physical.clone(), ctx.task_ctx())?;
         let mut results = Vec::new();
         while let Some(batch) = stream.try_next().await? {
             results.push(batch);
@@ -43,6 +59,14 @@ mod tests {
 
         // Expected: 1 row (from left side with NULL from empty right side)
         // Bug: Multiple rows due to distributed execution multiplying by number of nodes
+        
+        println!("Test result: {} rows", total_rows);
+        if !results.is_empty() {
+            println!("{}", pretty_format_batches(&results)?);
+        }
+        
+        println!("Physical plan:");
+        println!("{}", physical_str);
 
         assert_snapshot!(physical_str, @r"
         CoalesceBatchesExec: target_batch_size=8192
