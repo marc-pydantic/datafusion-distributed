@@ -53,19 +53,7 @@ mod tests {
             results.push(batch);
         }
 
-        // Count total rows
         let total_rows: usize = results.iter().map(|batch| batch.num_rows()).sum();
-
-        // Expected: 1 row (from left side with NULL from empty right side)
-        // Bug: Multiple rows due to distributed execution multiplying by number of nodes
-
-        println!("Test result: {} rows", total_rows);
-        if !results.is_empty() {
-            println!("{}", pretty_format_batches(&results)?);
-        }
-
-        println!("Physical plan:");
-        println!("{}", physical_str);
 
         assert_snapshot!(physical_str, @r"
         CoalesceBatchesExec: target_batch_size=8192
